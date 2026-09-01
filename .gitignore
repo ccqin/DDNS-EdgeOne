@@ -1,3 +1,20 @@
 /.venv/
 /uv.lock
 .idea
+
+# Python 字节码
+__pycache__/
+*.pyc
+*.pyo
+
+# 本地临时/会话目录(含真实网络信息,严禁入库)
+.tmp/
+.workbuddy/
+.zcode/
+
+# 敏感配置与日志(真实密钥/公网IP可能落盘,严禁入库)
+.env
+.env.*
+*.log
+*.log.txt
+eodo.config.yaml

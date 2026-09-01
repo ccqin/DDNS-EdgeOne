@@ -186,7 +186,9 @@ def get_hostname():
 
 hostname = get_hostname()
 
-CONFIG_PATH = os.path.join(str(HOME_DIR), CONFIG_FILENAME)
+# 支持 CONFIG_PATH 环境变量覆盖（与 Dockerfile 中 /app/config/eodo.config.yaml 的约定对齐），
+# 默认仍落在用户主目录。否则容器内配置会写到 /root/.eodo.config.yaml，不随挂载卷持久化。
+CONFIG_PATH = os.environ.get("CONFIG_PATH") or os.path.join(str(HOME_DIR), CONFIG_FILENAME)
 
 
 def read_config():
@@ -287,6 +289,56 @@ def verify_session_token(token: str) -> bool:
         return int(payload.get("exp", 0)) > int(time.time())
     except Exception:
         return False
+
+
+# ---- 登录限流：按客户端 IP 的滑动窗口计数，超过阈值后临时锁定 ----
+LOGIN_MAX_FAILURES = 5
+LOGIN_LOCKOUT_SECONDS = 15 * 60
+_login_failures: dict = {}
+_login_guard = threading.Lock()
+
+
+def _client_ip(request: Request) -> str:
+    """取客户端 IP。仅信任反代显式声明的 X-Forwarded-For 首跳。"""
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def login_lock_remaining(ip: str) -> int:
+    """返回该 IP 的剩余锁定秒数，0 表示未锁定。"""
+    now = time.time()
+    with _login_guard:
+        for key, stamps in list(_login_failures.items()):
+            fresh = [t for t in stamps if now - t < LOGIN_LOCKOUT_SECONDS]
+            if fresh:
+                _login_failures[key] = fresh
+            else:
+                _login_failures.pop(key, None)
+        stamps = _login_failures.get(ip, [])
+        if len(stamps) >= LOGIN_MAX_FAILURES:
+            return max(0, int(LOGIN_LOCKOUT_SECONDS - (now - stamps[-1])))
+    return 0
+
+
+def record_login_failure(ip: str) -> None:
+    with _login_guard:
+        _login_failures.setdefault(ip, []).append(time.time())
+
+
+def clear_login_failures(ip: str) -> None:
+    with _login_guard:
+        _login_failures.pop(ip, None)
+
+
+def request_is_https(request: Request) -> bool:
+    """判断请求是否经 HTTPS 到达（含反向代理场景），用于决定 Cookie secure 标志。"""
+    if (request.headers.get("x-forwarded-proto") or "").lower() == "https":
+        return True
+    return request.url.scheme == "https"
 
 
 # 公开路径：无需登录即可访问
@@ -1116,12 +1168,19 @@ def api_auth_status():
 @app.post('/api/setup')
 async def api_setup(request: Request):
     """首次启动时设置管理密码。仅在未设置过密码时可用。"""
+    ip = _client_ip(request)
+    lock = login_lock_remaining(ip)
+    if lock > 0:
+        return JSONResponse({"success": False, "message": f"尝试次数过多，请 {lock // 60 + 1} 分钟后再试"},
+                            status_code=429)
     if auth_is_configured():
         return {"success": False, "message": "密码已设置，如需重置请删除配置文件中的 Auth 段"}
     data = await request.json()
     password = (data.get("password") or "").strip()
     if len(password) < 8:
+        record_login_failure(ip)
         return {"success": False, "message": "密码至少 8 位"}
+    clear_login_failures(ip)
     cfg = read_config()
     cfg["Auth"] = {
         "PasswordHash": hash_password(password),
@@ -1130,23 +1189,56 @@ async def api_setup(request: Request):
     write_config(cfg)
     resp = JSONResponse({"success": True, "message": "密码已设置"})
     resp.set_cookie(SESSION_COOKIE, create_session_token(), httponly=True,
-                    samesite="lax", max_age=SESSION_TTL_SECONDS, path="/")
+                    samesite="lax", max_age=SESSION_TTL_SECONDS, path="/",
+                    secure=request_is_https(request))
     return resp
 
 
 @app.post('/api/login')
 async def api_login(request: Request):
+    ip = _client_ip(request)
+    lock = login_lock_remaining(ip)
+    if lock > 0:
+        return JSONResponse({"success": False, "message": f"尝试次数过多，请 {lock // 60 + 1} 分钟后再试"},
+                            status_code=429)
     data = await request.json()
     password = (data.get("password") or "")
     stored = get_auth_config().get("PasswordHash", "")
     if not stored:
         return {"success": False, "message": "尚未设置密码"}
     if not verify_password(password, stored):
-        logger.warning("登录失败：密码错误")
+        record_login_failure(ip)
+        logger.warning(f"登录失败：密码错误（客户端 {ip}）")
         return {"success": False, "message": "密码错误"}
+    clear_login_failures(ip)
     resp = JSONResponse({"success": True, "message": "登录成功"})
     resp.set_cookie(SESSION_COOKIE, create_session_token(), httponly=True,
-                    samesite="lax", max_age=SESSION_TTL_SECONDS, path="/")
+                    samesite="lax", max_age=SESSION_TTL_SECONDS, path="/",
+                    secure=request_is_https(request))
+    return resp
+
+
+@app.post('/api/change-password')
+async def api_change_password(request: Request):
+    """修改管理密码。成功后轮换 SessionSecret，所有旧会话立即失效。"""
+    data = await request.json()
+    old_password = data.get("old_password") or ""
+    new_password = (data.get("new_password") or "").strip()
+    if len(new_password) < 8:
+        return {"success": False, "message": "新密码至少 8 位"}
+    stored = get_auth_config().get("PasswordHash", "")
+    if not stored or not verify_password(old_password, stored):
+        return {"success": False, "message": "原密码错误"}
+    cfg = read_config()
+    auth = cfg.get("Auth") if isinstance(cfg.get("Auth"), dict) else {}
+    auth["PasswordHash"] = hash_password(new_password)
+    # 轮换会话签名密钥：修改密码后吊销全部已签发的会话
+    auth["SessionSecret"] = secrets.token_urlsafe(32)
+    cfg["Auth"] = auth
+    write_config(cfg)
+    logger.info("管理密码已修改，SessionSecret 已轮换")
+    resp = JSONResponse({"success": True, "message": "密码已修改，请重新登录"})
+    resp.delete_cookie(SESSION_COOKIE, path="/")
     return resp
 
 
@@ -1211,11 +1303,46 @@ def api_ipv6_addresses(iface: str = None):
     return sorted(ipv6_addresses)
 
 
+def _mask_secret(value: str) -> str:
+    """密钥掩码：保留末 4 位便于核对，其余打码。空值原样返回。"""
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "****"
+    return f"****{value[-4:]}"
+
+
+def _mask_webhook(url) -> object:
+    """掩码钉钉 webhook 中的 access_token 参数，保留 URL 结构。"""
+    if not isinstance(url, str) or "access_token=" not in url:
+        return url
+    masked = re.sub(r"(access_token=)([^&]+)", lambda m: m.group(1) + _mask_secret(m.group(2)), url)
+    return masked
+
+
+def _is_masked_secret(value) -> bool:
+    """判断提交值是否为掩码占位（以 **** 开头的短串），是则保留原值不覆盖。"""
+    return isinstance(value, str) and value.startswith("****")
+
+
+def _is_masked_webhook(value) -> bool:
+    return isinstance(value, str) and "access_token=****" in value
+
+
 def _public_config(cfg: dict) -> dict:
-    """返回给前端的配置：剔除 Auth 段，避免密钥哈希与会话密钥外泄。"""
+    """返回给前端的配置：剔除 Auth 段并对密钥类字段掩码，避免明文外泄。"""
     if not isinstance(cfg, dict):
         return {}
-    return {k: v for k, v in cfg.items() if k != "Auth"}
+    public = {k: v for k, v in cfg.items() if k != "Auth"}
+    tc = public.get("TencentCloud")
+    if isinstance(tc, dict):
+        tc = dict(tc)
+        if tc.get("SecretKey"):
+            tc["SecretKey"] = _mask_secret(str(tc["SecretKey"]))
+        public["TencentCloud"] = tc
+    if public.get("DingTalkWebhook"):
+        public["DingTalkWebhook"] = _mask_webhook(public["DingTalkWebhook"])
+    return public
 
 
 @app.get('/api/config')
@@ -1233,6 +1360,26 @@ ALLOWED_CONFIG_KEYS = {
 }
 
 
+def _apply_secret_placeholders(filtered: dict, existing: dict) -> dict:
+    """密钥掩码占位处理：前端原样传回掩码或提交空 SecretKey 时，保留服务端原值。
+
+    SecretKey 无法通过面板清空（防止误清空导致任务停摆），如需彻底清除请删除配置文件。
+    """
+    tc_new = filtered.get("TencentCloud")
+    if isinstance(tc_new, dict):
+        tc_old = existing.get("TencentCloud") if isinstance(existing.get("TencentCloud"), dict) else {}
+        tc_new = dict(tc_new)
+        sk = tc_new.get("SecretKey")
+        if not sk or _is_masked_secret(sk):
+            tc_new["SecretKey"] = tc_old.get("SecretKey", "")
+        filtered["TencentCloud"] = tc_new
+
+    wh = filtered.get("DingTalkWebhook")
+    if _is_masked_webhook(wh):
+        filtered["DingTalkWebhook"] = existing.get("DingTalkWebhook", "")
+    return filtered
+
+
 @app.post('/api/config')
 async def post_config(request: Request):
     data = await request.json()
@@ -1242,6 +1389,7 @@ async def post_config(request: Request):
     # 只允许白名单内的键，并保留服务端管理的 Auth 段
     filtered = {k: v for k, v in data.items() if k in ALLOWED_CONFIG_KEYS}
     existing = read_config()
+    filtered = _apply_secret_placeholders(filtered, existing)
     filtered["Auth"] = existing.get("Auth", {})
 
     interval = filtered.get("IntervalMin", None)

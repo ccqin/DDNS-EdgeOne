@@ -1,57 +1,44 @@
-# 基础镜像
-FROM python:alpine3.20
+# ---- 构建阶段：安装依赖（编译工具链不进入最终镜像） ----
+FROM python:alpine3.20 AS builder
 
-# 设置工作目录
-WORKDIR /app
-
-# 复制依赖文件
 COPY requirements.txt ./
 
-# 更换为USTC镜像源
-RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositories
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositories \
+    && apk add --no-cache gcc python3-dev musl-dev linux-headers \
+    && pip config set global.index-url https://mirrors.ustc.edu.cn/pypi/simple \
+    && pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-# 安装系统依赖
-RUN apk update && \
-    apk add --no-cache \
-    gcc \
-    python3-dev \
-    musl-dev \
-    linux-headers \
-    py3-psutil
+# ---- 运行阶段：仅包含运行时依赖 ----
+FROM python:alpine3.20
 
-# 配置时区
-RUN apk add --no-cache tzdata && \
-    cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
-    echo "Asia/Shanghai" > /etc/timezone && \
-    apk del tzdata
+# 时区 Asia/Shanghai
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositories \
+    && apk add --no-cache tzdata \
+    && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo "Asia/Shanghai" > /etc/timezone \
+    && apk del tzdata
 
-# 设置 pip 使用USTC镜像源
-RUN pip config set global.index-url https://mirrors.ustc.edu.cn/pypi/simple
+COPY --from=builder /install /usr/local
 
-# 安装依赖
-RUN pip install --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
-
-# 复制项目代码
+WORKDIR /app
 COPY src ./src
-COPY README.md ./
-COPY img.png ./
+COPY README.md img.png ./
 
-# 创建配置目录
-RUN mkdir -p /app/config
+# 非 root 运行；固定 uid 1000 便于宿主机对挂载目录授权（chown 1000 或 chmod）
+RUN addgroup -S eodo && adduser -S -u 1000 -G eodo eodo \
+    && mkdir -p /app/config \
+    && chown -R eodo:eodo /app
+USER eodo
 
-# 设置配置目录为挂载点
 VOLUME ["/app/config"]
 
-# 设置环境变量
 ENV PYTHONUNBUFFERED=1
+# 配置文件落在挂载卷内，容器重建后密钥与密码配置不丢失
 ENV CONFIG_PATH="/app/config/eodo.config.yaml"
+# 容器内绑定全部接口是标准做法，实际暴露面由 docker -p 端口映射控制
+# （推荐 -p 127.0.0.1:54321:54321，远程访问走反向代理 + TLS）
+ENV EODO_HOST="0.0.0.0"
 
-# 暴露端口
 EXPOSE 54321
 
-# 创建初始化配置文件的脚本
-RUN printf 'import yaml\nimport os\n\n# 创建配置目录\nconfig_dir = "/app/config"\nif not os.path.exists(config_dir):\n    os.makedirs(config_dir)\n\n# 获取配置文件路径\nconfig_path = os.environ.get("CONFIG_PATH", "/app/config/eodo.config.yaml")\n\n# 如果配置文件不存在，创建默认配置\nif not os.path.exists(config_path):\n    default_config = {\n        "TencentCloud": {"SecretId": "", "SecretKey": ""},\n        "EdgeOne": {"ZoneId": []},\n        "DnsPod": {"Record": []},\n        "DingTalk": {"Webhook": ""},\n        "Interval": 5,\n        "SelectIface": "",\n        "IPv6Regex": "",\n        "CustomIPList": []\n    }\n    with open(config_path, "w") as f:\n        yaml.dump(default_config, f)\n    print(f"Default config file created at {config_path}")\nelse:\n    print(f"Config file already exists at {config_path}")' > /app/init_config.py
-
-# 启动命令，先初始化配置文件，再启动应用
-CMD ["sh", "-c", "python /app/init_config.py && python src/eodo/app.py -p 54321"]
+CMD ["python", "src/eodo/app.py", "-p", "54321"]

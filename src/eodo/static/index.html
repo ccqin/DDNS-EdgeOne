@@ -23,7 +23,10 @@
 <div class="page page-center">
   <div class="d-flex justify-content-between align-items-center mb-3">
     <div class="tabler-logo mb-0">EdgeOne Dynamic Origin 控制台</div>
-    <button class="btn btn-outline-secondary btn-sm" onclick="doLogout();">退出登录</button>
+    <div class="d-flex gap-2">
+      <button class="btn btn-outline-secondary btn-sm" data-bs-toggle="modal" data-bs-target="#pwdModal">修改密码</button>
+      <button class="btn btn-outline-secondary btn-sm" onclick="doLogout();">退出登录</button>
+    </div>
   </div>
   <!-- 状态卡片 -->
   <div class="card mb-4">
@@ -180,6 +183,7 @@
           <div class="col-md-6">
             <label class="form-label required">SecretKey</label>
             <input class="form-control" type="password" name="SecretKey" id="SecretKey" required>
+            <div class="form-text">已配置的密钥以掩码（****结尾4位）回显；输入新值可更换，留空或保持掩码则不修改。</div>
           </div>
         </div>
         <!-- EdgeOne站点配置 -->
@@ -310,6 +314,36 @@
   </div>
 </div>
 
+<!-- 修改密码模态窗口 -->
+<div class="modal modal-blur fade" id="pwdModal" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-sm modal-dialog-centered" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">修改管理密码</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+      </div>
+      <div class="modal-body">
+        <form id="pwdForm" autocomplete="off">
+          <div class="mb-3">
+            <label class="form-label required">原密码</label>
+            <input class="form-control" type="password" id="old_password" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label required">新密码（至少 8 位）</label>
+            <input class="form-control" type="password" id="new_password" minlength="8" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label required">确认新密码</label>
+            <input class="form-control" type="password" id="new_password2" minlength="8" required>
+          </div>
+          <div class="text-muted small mb-2">修改成功后所有已登录会话将失效，需要重新登录。</div>
+          <button type="submit" class="btn btn-primary w-100" id="pwdSubmit">确认修改</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Toast提示 -->
 <div id="toast" style="
   display:none;position:fixed;left:50%;bottom:54px;min-width:160px;
@@ -318,6 +352,7 @@
   box-shadow:0 2px 16px #206bc40a;letter-spacing:0.02em;">TOAST
 </div>
 
+<script src="/static/vendor/bootstrap.bundle.min.js"></script>
 <script src="/static/vendor/tabler.min.js"></script>
 <script>
 // --- Toast ---
@@ -327,6 +362,13 @@ function showToast(msg, timeout=2200){
     t.style.display="block";
     clearTimeout(t._hid);
     t._hid = setTimeout(()=>{t.style.display="none"}, timeout);
+}
+
+// --- HTML 转义：所有拼入 innerHTML 的动态值必须先转义，防止存储型 XSS ---
+function escapeHtml(v){
+    return String(v ?? "").replace(/[&<>"']/g, c => ({
+        "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+    }[c]));
 }
 
 // 统一处理会话失效：后端返回 401 时跳转登录页
@@ -347,6 +389,34 @@ async function doLogout(){
     window.location.href = "/login";
 }
 
+// ---- 修改密码 ----
+document.getElementById('pwdForm').onsubmit = function(e){
+    e.preventDefault();
+    const np = document.getElementById('new_password').value;
+    const np2 = document.getElementById('new_password2').value;
+    if (np !== np2) { showToast("两次输入的新密码不一致"); return; }
+    const btn = document.getElementById('pwdSubmit');
+    btn.disabled = true;
+    apiFetch('/api/change-password', {
+        method: "POST", headers: {"content-type":"application/json"},
+        body: JSON.stringify({
+            old_password: document.getElementById('old_password').value,
+            new_password: np
+        })
+    }).then(r=>r.json()).then(d=>{
+        if (d.success) {
+            showToast(d.message || "密码已修改");
+            setTimeout(()=>{ window.location.href = "/login"; }, 1200);
+        } else {
+            showToast(d.message || "修改失败", 2800);
+            btn.disabled = false;
+        }
+    }).catch(()=>{
+        showToast("请求失败", 2500);
+        btn.disabled = false;
+    });
+};
+
 // 状态
 function fetchStatus(){
     let dom = document.getElementById('status');
@@ -363,10 +433,10 @@ function fetchStatus(){
             badgeClass = 'bg-warning';
         }
         dom.innerHTML = `
-            <b>任务ID:</b> ${res.id||'未知'}<br>
-            <b>任务时间:</b> ${res.time||''}<br>
+            <b>任务ID:</b> ${escapeHtml(res.id||'未知')}<br>
+            <b>任务时间:</b> ${escapeHtml(res.time||'')}<br>
             <b>状态:</b> <span class="badge ${badgeClass}">
-            ${res.result||'未知'}</span>
+            ${escapeHtml(res.result||'未知')}</span>
         `;
     }).catch(()=>{ dom.innerHTML = '<span class="text-danger">获取失败</span>'; });
 }
@@ -390,7 +460,7 @@ function setIntervalM(){
 function addEdgeOneRow(val="") {
   let tb = document.getElementById("EdgeOneTable").getElementsByTagName("tbody")[0];
   let tr = tb.insertRow();
-  let td0 = tr.insertCell(); td0.innerHTML = `<input type="text" class="form-control" value="${val}">`;
+  let td0 = tr.insertCell(); td0.innerHTML = `<input type="text" class="form-control" value="${escapeHtml(val)}">`;
   let td1 = tr.insertCell(); td1.innerHTML = `<button type="button" class="btn btn-link text-danger btn-del" onclick="this.closest('tr').remove()">移除</button>`;
 }
 function setEdgeOneTable(arr) {
@@ -449,9 +519,9 @@ function getEdgeOneZoneArr() {
 function addDnsRow(sub="",typ="AAAA",root="") {
   let tb = document.getElementById("DnsPodTable").getElementsByTagName("tbody")[0];
   let tr = tb.insertRow();
-  tr.insertCell().innerHTML = `<input type="text" class="form-control" value="${sub}">`;
+  tr.insertCell().innerHTML = `<input type="text" class="form-control" value="${escapeHtml(sub)}">`;
   tr.insertCell().innerHTML = `<select class="form-select" disabled><option value="AAAA">AAAA</option></select>`;
-  tr.insertCell().innerHTML = `<input type="text" class="form-control" value="${root}">`;
+  tr.insertCell().innerHTML = `<input type="text" class="form-control" value="${escapeHtml(root)}">`;
   tr.insertCell().innerHTML = `<button type="button" class="btn btn-link text-danger btn-del" onclick="this.closest('tr').remove()">移除</button>`;
 }
 function setDnsPodTable(arr) {
@@ -895,10 +965,24 @@ function setupAccelDomainForm() {
 function addAccelDomainRow(zoneId, domainName, originConfig) {
   let tb = document.getElementById("AccelDomainsTable").getElementsByTagName("tbody")[0];
   let tr = tb.insertRow();
-  tr.insertCell().innerHTML = `<input type="text" class="form-control" value="${zoneId}" readonly>`;
-  tr.insertCell().innerHTML = `<input type="text" class="form-control" value="${domainName}" readonly>`;
-  tr.insertCell().innerHTML = `<input type="text" class="form-control" value="${originConfig}" readonly>`;
-  tr.insertCell().innerHTML = `<button type="button" class="btn btn-link text-danger btn-del" onclick="deleteAccelDomain('${zoneId}', '${domainName}', this)">移除</button>`;
+  // 用 DOM API + value 赋值而非 innerHTML 拼接，彻底杜绝配置值逃逸属性/内联 JS 的存储型 XSS
+  const mkInput = v => {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "form-control";
+    input.readOnly = true;
+    input.value = v;
+    return input;
+  };
+  tr.insertCell().appendChild(mkInput(zoneId));
+  tr.insertCell().appendChild(mkInput(domainName));
+  tr.insertCell().appendChild(mkInput(originConfig));
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "btn btn-link text-danger btn-del";
+  btn.textContent = "移除";
+  btn.addEventListener("click", () => deleteAccelDomain(zoneId, domainName, btn));
+  tr.insertCell().appendChild(btn);
 }
 
 // 删除加速域名
