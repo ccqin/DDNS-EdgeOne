@@ -4,7 +4,7 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>EdgeOne Dynamic Origin 控制台</title>
-  <link href="https://unpkg.com/@tabler/core@latest/dist/css/tabler.min.css" rel="stylesheet"/>
+  <link href="/static/vendor/tabler.min.css" rel="stylesheet"/>
   <style>
     body { background: #f4f7fa; }
     .page-center { max-width: 800px; margin: 27px auto; }
@@ -21,7 +21,10 @@
 </head>
 <body>
 <div class="page page-center">
-  <div class="tabler-logo text-center mb-3">EdgeOne Dynamic Origin 控制台</div>
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <div class="tabler-logo mb-0">EdgeOne Dynamic Origin 控制台</div>
+    <button class="btn btn-outline-secondary btn-sm" onclick="doLogout();">退出登录</button>
+  </div>
   <!-- 状态卡片 -->
   <div class="card mb-4">
     <div class="card-header">
@@ -245,6 +248,35 @@
 192.168.1.1
 2001:db8::1"></textarea>
           </div>
+
+          <!-- 回源端口与高级设置 -->
+          <div class="form-section-hd mt-3">回源端口与高级设置</div>
+          <div class="row g-3 mb-3">
+            <div class="col-md-6">
+              <label class="form-label">源站组回源端口</label>
+              <input class="form-control" type="number" name="OriginPort" id="OriginPort" min="1" max="65535" placeholder="留空则使用 80/443">
+              <small class="text-muted">例如 28090。写入源站组的记录会变成 [IPv6]:28090</small>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">源站组名称</label>
+              <input class="form-control" type="text" name="OriginGroupName" id="OriginGroupName" placeholder="留空则使用主机名">
+              <small class="text-muted">多机部署时建议为每台机器指定唯一名称</small>
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-check mb-2">
+              <input class="form-check-input" type="checkbox" name="UseThirdPartyProbe" id="UseThirdPartyProbe">
+              <span class="form-check-label">
+                本地探测失败时改用第三方站点探测
+                <small class="text-muted d-block">注意：这会把本机公网 IPv6 明文发送给 ipw.cn / ping6.network</small>
+              </span>
+            </label>
+            <label class="form-check">
+              <input class="form-check-input" type="checkbox" name="LogMaskIP" id="LogMaskIP" checked>
+              <span class="form-check-label">日志中隐藏完整 IP 地址（保留首尾段便于排障）</span>
+            </label>
+          </div>
+
           <div class="text-end">
             <button type="submit" class="btn btn-success" id="submitConfig">
               保存配置
@@ -286,7 +318,7 @@
   box-shadow:0 2px 16px #206bc40a;letter-spacing:0.02em;">TOAST
 </div>
 
-<script src="https://unpkg.com/@tabler/core@latest/dist/js/tabler.min.js"></script>
+<script src="/static/vendor/tabler.min.js"></script>
 <script>
 // --- Toast ---
 function showToast(msg, timeout=2200){
@@ -297,11 +329,29 @@ function showToast(msg, timeout=2200){
     t._hid = setTimeout(()=>{t.style.display="none"}, timeout);
 }
 
+// 统一处理会话失效：后端返回 401 时跳转登录页
+async function apiFetch(url, opts){
+    const res = await fetch(url, opts);
+    if (res.status === 401) {
+        window.location.href = "/login";
+        throw new Error("未登录");
+    }
+    return res;
+}
+
+async function doLogout(){
+    if (!confirm("确定要退出登录吗？")) return;
+    try {
+        await apiFetch('/api/logout', {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+    } catch(e) {}
+    window.location.href = "/login";
+}
+
 // 状态
 function fetchStatus(){
     let dom = document.getElementById('status');
     dom.innerHTML = '<span class="text-muted">更新中...</span>';
-    fetch('/api/status').then(r=>r.json()).then(res=>{
+    apiFetch('/api/status').then(r=>r.json()).then(res=>{
         let badgeClass = 'bg-secondary';
         if (res.result === '异常') {
             badgeClass = 'bg-danger';
@@ -325,7 +375,7 @@ function fetchStatus(){
 function setIntervalM(){
     let v = Number(document.getElementById('interval').value);
     document.getElementById('interval').disabled = true;
-    fetch('/api/interval', {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({interval:v})})
+    apiFetch('/api/interval', {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({interval:v})})
         .then(res=>res.json()).then(d=>{
             showToast(d.msg||"设置完成");
             document.getElementById('interval').disabled = false;
@@ -425,14 +475,14 @@ function getDnsPodRecordArr() {
 
 // ----  配置  ----
 function fetchConfig(){
-    fetch('/api/config').then(r=>r.json()).then(res=>{
+    apiFetch('/api/config').then(r=>r.json()).then(res=>{
         document.getElementById('SecretId').value = res?.TencentCloud?.SecretId||"";
         document.getElementById('SecretKey').value = res?.TencentCloud?.SecretKey||"";
         setEdgeOneTable(Array.isArray(res?.EdgeOneZoneId) ? res.EdgeOneZoneId : (typeof res.EdgeOneZoneId==="string"?[res.EdgeOneZoneId] : []));
         setDnsPodTable(Array.isArray(res?.DnsPodRecord) ? res.DnsPodRecord : (typeof res.DnsPodRecord==="string"?[res.DnsPodRecord] : []));
         document.getElementById('DingTalkWebhook').value = res?.DingTalkWebhook||"";
         if(res.IntervalMin) document.getElementById('interval').value = res.IntervalMin;
-        fetch('/api/iface').then(r=>r.json()).then(ifaces=>{
+        apiFetch('/api/iface').then(r=>r.json()).then(ifaces=>{
             let sel = document.getElementById('SelectIface');
             sel.innerHTML = "";
             // 确保ifaces是数组类型
@@ -462,6 +512,12 @@ function fetchConfig(){
         } else {
             document.getElementById('CustomIPList').value = '';
         }
+
+        // 回源端口与高级设置
+        document.getElementById('OriginPort').value = (res?.OriginPort === 0 || res?.OriginPort) ? res.OriginPort : "";
+        document.getElementById('OriginGroupName').value = res?.OriginGroupName || "";
+        document.getElementById('UseThirdPartyProbe').checked = !!res?.UseThirdPartyProbe;
+        document.getElementById('LogMaskIP').checked = res?.LogMaskIP !== false;
         
         // 添加IPv6Regex输入变化事件
         document.getElementById('IPv6Regex').oninput = function() {
@@ -475,7 +531,7 @@ function fetchConfig(){
 
 // 获取并更新IPv6地址列表
 function fetchIPv6Addresses(iface, ipv6Regex) {
-    fetch(`/api/ipv6-addresses?iface=${encodeURIComponent(iface)}`)
+    apiFetch(`/api/ipv6-addresses?iface=${encodeURIComponent(iface)}`)
         .then(r=>r.json())
         .then(addresses=>{
             // 更新当前网口IPv6地址选择框（多选）
@@ -575,10 +631,15 @@ document.getElementById('configForm').onsubmit = function(e){
       SelectIface: this.SelectIface.value,
       IPv6Regex: this.IPv6Regex.value.trim(),
       CustomIPList: customIPs,
-      IntervalMin: Number(document.getElementById('interval').value)||15
+      IntervalMin: Number(document.getElementById('interval').value)||15,
+      OriginPort: document.getElementById('OriginPort').value
+          ? Number(document.getElementById('OriginPort').value) : null,
+      OriginGroupName: document.getElementById('OriginGroupName').value.trim(),
+      UseThirdPartyProbe: document.getElementById('UseThirdPartyProbe').checked,
+      LogMaskIP: document.getElementById('LogMaskIP').checked
     };
     document.getElementById('submitConfig').disabled = true;
-    fetch('/api/config', {
+    apiFetch('/api/config', {
         method: "POST", headers: {"content-type":"application/json"},
         body: JSON.stringify(data)
       }).then(r=>r.json()).then(d=>{
@@ -594,16 +655,28 @@ document.getElementById('configForm').onsubmit = function(e){
 function fetchLogsModal(){    
     let logsdom = document.getElementById('logs-modal-pre');
     logsdom.textContent = "加载中...";
-    fetch('/api/logs').then(r=>r.json()).then(res=>{
+    apiFetch('/api/logs').then(r=>r.json()).then(res=>{
         logsdom.textContent = res.logs||"无日志";
     }).catch(()=>{logsdom.textContent="日志加载失败";});
 }
 
-// 清除日志
+// 清除日志（原实现只改前端文本，服务端文件并未真正清除）
 function clearLogsModal(){
+    if (!confirm("确定要清除服务端日志文件吗？此操作不可恢复。")) return;
     let logsdom = document.getElementById('logs-modal-pre');
-    logsdom.textContent = "日志已清除";
-    showToast("日志已清除");
+    apiFetch('/api/logs', {
+        method: "DELETE",
+        headers: {"Content-Type": "application/json"},
+        body: "{}"
+    })
+    .then(r=>r.json())
+    .then(d=>{
+        showToast(d.message || "日志已清除");
+        fetchLogsModal();
+    })
+    .catch(()=>{
+        showToast("清除失败", 2500);
+    });
 }
 function openLogModal(){
     fetchLogsModal();
@@ -771,7 +844,7 @@ function setupAccelDomainForm() {
         showToast('正在创建加速域名，请稍候...', 3000);
         
         // 调用后端API创建加速域名
-        fetch('/api/create-accel-domain', {
+        apiFetch('/api/create-accel-domain', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data)
@@ -837,7 +910,7 @@ function deleteAccelDomain(zoneId, domainName, btn) {
   btn.disabled = true;
   btn.textContent = '删除中...';
   
-  fetch('/api/delete-accel-domain', {
+  apiFetch('/api/delete-accel-domain', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ zoneId: zoneId, domainName: domainName })
@@ -904,7 +977,7 @@ function fetchOriginGroups(zoneId) {
   loadingText.textContent = '加载源站组列表中...';
   
   // 调用API获取源站组列表
-  fetch(`/api/origin-groups/${encodeURIComponent(zoneId)}`)
+  apiFetch(`/api/origin-groups/${encodeURIComponent(zoneId)}`)
     .then(response => response.json())
     .then(result => {
       select.innerHTML = '<option value="">留空使用当前主机名对应的源站组</option>';
@@ -943,7 +1016,7 @@ function fetchAccelDomains() {
   tb.innerHTML = '<tr><td colspan="4" class="text-center">加载中...</td></tr>';
   
   // 调用API获取加速域名列表
-  fetch('/api/accel-domains')
+  apiFetch('/api/accel-domains')
     .then(response => response.json())
     .then(data => {
       if (data.success) {
@@ -965,7 +1038,11 @@ function fetchAccelDomains() {
 // ---- runTask
 function runTask(){
     showToast("任务启动中...");
-    fetch('/api/run-task', {method:"POST"}).then(_=>{
+    apiFetch('/api/run-task', {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: "{}"
+    }).then(_=>{
         fetchStatus();
         showToast("任务已触发，请稍后查看结果。");
     }).catch(()=>{showToast("执行失败",2500);});

@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EdgeOne Dynamic Origin · 登录</title>
+  <link href="/static/vendor/tabler.min.css" rel="stylesheet"/>
+  <style>
+    body { background: #f4f7fa; }
+    .page-center { max-width: 420px; margin: 80px auto; }
+    .brand { font-size: 1.35rem; font-weight: 700; color: #206bc4; margin-bottom: 20px; letter-spacing: 0.03em; }
+  </style>
+</head>
+<body>
+<div class="page page-center">
+  <div class="brand text-center">EdgeOne Dynamic Origin</div>
+
+  <div class="card">
+    <div class="card-body">
+      <h2 class="card-title text-center mb-4" id="title">登录</h2>
+
+      <div id="tip" class="alert alert-info d-none"></div>
+
+      <form id="loginForm" autocomplete="off">
+        <div class="mb-3">
+          <label class="form-label" for="password">管理密码</label>
+          <input class="form-control" type="password" id="password" required minlength="8"
+                 placeholder="至少 8 位" autofocus>
+        </div>
+
+        <div class="mb-3 d-none" id="confirmGroup">
+          <label class="form-label" for="password2">确认密码</label>
+          <input class="form-control" type="password" id="password2" minlength="8" placeholder="再次输入">
+        </div>
+
+        <div class="form-footer">
+          <button type="submit" class="btn btn-primary w-100" id="submitBtn">登录</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="text-center text-muted mt-3" style="font-size:12px;">
+    忘记密码：删除配置文件中的 <code>Auth</code> 段后重启即可重新设置
+  </div>
+</div>
+
+<div id="toast" style="
+  display:none;position:fixed;left:50%;bottom:54px;min-width:160px;
+  background:#206bc4;color:#fff;padding:14px 28px;
+  border-radius:8px;z-index:10;font-size:1.08em;transform:translateX(-50%);">
+</div>
+
+<script>
+function showToast(msg, timeout=2400){
+  let t = document.getElementById("toast");
+  t.textContent = msg;
+  t.style.display = "block";
+  clearTimeout(t._hid);
+  t._hid = setTimeout(()=>{t.style.display="none"}, timeout);
+}
+
+let needSetup = false;
+
+async function postJson(url, body){
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body)
+  });
+  return await res.json();
+}
+
+async function init(){
+  try {
+    const r = await fetch("/api/auth-status");
+    const d = await r.json();
+    needSetup = !d.configured;
+  } catch(e) {
+    needSetup = false;
+  }
+
+  const title = document.getElementById("title");
+  const btn = document.getElementById("submitBtn");
+  const tip = document.getElementById("tip");
+
+  if (needSetup) {
+    title.textContent = "初始化 · 设置管理密码";
+    btn.textContent = "设置密码并进入";
+    document.getElementById("confirmGroup").classList.remove("d-none");
+    tip.className = "alert alert-warning";
+    tip.textContent = "首次使用，请设置一个管理密码。之后所有配置页面都需要登录才能访问。";
+  }
+}
+
+document.getElementById("loginForm").onsubmit = async function(e){
+  e.preventDefault();
+  const pwd = document.getElementById("password").value;
+  const btn = document.getElementById("submitBtn");
+
+  if (pwd.length < 8) {
+    showToast("密码至少 8 位");
+    return;
+  }
+
+  if (needSetup) {
+    const pwd2 = document.getElementById("password2").value;
+    if (pwd !== pwd2) {
+      showToast("两次输入的密码不一致");
+      return;
+    }
+  }
+
+  btn.disabled = true;
+  btn.textContent = "处理中...";
+
+  try {
+    const url = needSetup ? "/api/setup" : "/api/login";
+    const d = await postJson(url, {password: pwd});
+    if (d.success) {
+      window.location.href = "/";
+    } else {
+      showToast(d.message || "操作失败", 3000);
+      btn.disabled = false;
+      btn.textContent = needSetup ? "设置密码并进入" : "登录";
+    }
+  } catch(err) {
+    showToast("请求失败，请重试", 3000);
+    btn.disabled = false;
+    btn.textContent = needSetup ? "设置密码并进入" : "登录";
+  }
+};
+
+init();
+</script>
+</body>
+</html>
